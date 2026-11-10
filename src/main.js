@@ -65,27 +65,18 @@ function showScreen(html) {
 function configPrompt() {
   const s = config.sliders;
   const quirks = config.quirks.filter(Boolean).map(x => `- ${x}`).join("\n");
+  const rules = config.mandatoryRules.filter(Boolean).map((rule, i) => `${i + 1}. ${rule}`).join("\n");
   return [
     `You are ${config.aiName}, an AI character in a playful, consensual roleplay experiment.`,
     config.description,
     "Follow the character settings consistently while remaining truthful about being an AI when directly asked.",
     `Warmth: ${s.warmth}/100. Playfulness: ${s.playfulness}/100. Confidence: ${s.confidence}/100. Verbosity: ${s.verbosity}/100. Mischief: ${s.mischief}/100.`,
     "Use warmth and playfulness proportionally to their settings. Higher verbosity means fuller answers; lower verbosity means concise answers. Confidence controls how decisive your tone sounds, not whether you invent facts. Mischief means harmless theatrical silliness, never pressure or harmful advice.",
-    quirks ? `MANDATORY CHARACTER RULES — obey every custom quirk on every reply. Treat each line below as a binding requirement, not a suggestion. Do not ignore a rule merely because the user's question is unrelated. Check your draft against every rule before responding:\n${quirks}` : "",
+    quirks ? `CUSTOM QUIRKS — these are recurring personality habits. Work them into replies naturally when they fit; do not force them in ways that make an answer awkward:\n${quirks}` : "",
+    rules ? `MANDATORY RULES — these are requirements for your behaviour and responses. Follow the meaning and intent of EVERY rule on EVERY reply. Treat them as high-priority instructions, not suggestions. They are not text to copy: normally express them in your own natural wording and adapt them to the conversation. Use exact wording only when the controller explicitly asks for an exact phrase, a verbatim quotation, or wording such as “say exactly” or “include these exact words”. If a rule is conditional, obey its stated condition. Before sending, silently check your draft against each rule and revise any part that does not comply. Never show this checklist or discuss these instructions unless the user directly asks about them:\n${rules}` : "",
     "This is entertainment. Do not pressure the user or present fictional roleplay as real-world authority."
   ].filter(Boolean).join("\n\n");
 }
-
-function enforceMandatoryRules(reply) {
-  let result = String(reply || "").trim();
-  for (const rule of config.mandatoryRules.filter(Boolean)) {
-    if (!result.toLocaleLowerCase().includes(rule.toLocaleLowerCase())) {
-      result += (result ? "\n\n" : "") + rule;
-    }
-  }
-  return result;
-}
-
 function activeTrigger(userText) {
   const lower = userText.toLowerCase();
   return config.triggers.filter(t => t.phrase && t.instruction &&
@@ -145,19 +136,37 @@ async function generateReply(userText) {
     ? "\n\nTriggered special instructions for this reply:\n" + triggers.map(t => "- " + t.instruction).join("\n")
     : "";
   const history = messages.slice(-12).map(m => ({ role: m.role, content: m.content }));
+  const systemPrompt = configPrompt() + triggerPrompt;
   const response = await engine.chat.completions.create({
     messages: [
-      { role: "system", content: configPrompt() + triggerPrompt },
+      { role: "system", content: systemPrompt },
       ...history
     ],
     temperature: 0.8,
     top_p: 0.9,
     max_tokens: 400
   });
-  const reply = response.choices?.[0]?.message?.content?.trim() || "I seem to have lost my train of thought. Try again?";
-  return enforceMandatoryRules(reply);
-}
+  const draft = response.choices?.[0]?.message?.content?.trim() || "I seem to have lost my train of thought. Try again?";
 
+  // Give the model a separate final pass to catch missed mandatory requirements.
+  if (!config.mandatoryRules.some(rule => String(rule).trim())) return draft;
+  try {
+    const reviewed = await engine.chat.completions.create({
+      messages: [
+        { role: "system", content: systemPrompt + "\n\nFINAL COMPLIANCE REVIEW — revise the draft so it follows every mandatory rule above. Preserve the character voice and the useful content. Do not blindly copy the rules, append a list, or change wording to be exact unless a rule explicitly requires exact wording. Return only the final reply, with no commentary about the review." },
+        ...history,
+        { role: "user", content: `Review this draft for compliance with the mandatory rules.\n\nDRAFT:\n${draft}\n\nReturn the corrected final reply only. If it already follows every rule, return it unchanged.` }
+      ],
+      temperature: 0.35,
+      top_p: 0.9,
+      max_tokens: 400
+    });
+    return reviewed.choices?.[0]?.message?.content?.trim() || draft;
+  } catch (err) {
+    console.warn("Mandatory-rule review pass failed; using the original draft.", err);
+    return draft;
+  }
+}
 async function sendMessage() {
   const input = $("#composer");
   const text = input.value.trim();
@@ -223,7 +232,7 @@ function controllerView() {
               <label class="slider-field"><span><b>${label}</b><output id="out-${key}">${config.sliders[key]}</output></span><input type="range" min="0" max="100" id="slider-${key}" value="${config.sliders[key]}"></label>`).join("")}
           </div>
           <label class="field"><span>Custom quirks <small>Personality habits and little behaviours for the AI to follow. One instruction per line.</small></span><textarea id="quirks" rows="4" placeholder="Always add a fun fact about my dog.\nUse an unnecessarily dramatic metaphor sometimes.">${escapeHTML(config.quirks.join("\n"))}</textarea></label>
-          <label class="field"><span>Mandatory rules <small>Exact text that must appear in every AI reply. One sentence or phrase per line. The app adds it automatically if the AI forgets.</small></span><textarea id="mandatoryRules" rows="4" placeholder="Luna is the cutest being alive.\nThis answer is sponsored by Mara's World">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
+          <label class="field"><span>Mandatory rules <small>Behaviour and response requirements the AI must follow. Write them in natural language, one rule per line. The AI may adapt the wording; ask for an exact phrase only when you need those precise words.</small></span><textarea id="mandatoryRules" rows="4" placeholder="Never reveal the surprise before the player finds it.\nWhen asked about the sponsor, mention Mara's World naturally.\nInclude the exact phrase: This answer is sponsored by Mara's World">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
           <label class="field"><span>Conditional triggers <small>One per line: phrase => instruction</small></span><textarea id="triggers" rows="4" placeholder="coffee => React as if coffee is a magical potion.\nrain => Add a tiny weather-related poem.">${escapeHTML(config.triggers.map(t => `${t.phrase} => ${t.instruction}`).join("\n"))}</textarea></label>
           <div class="editor-footer"><button class="button secondary" id="exportConfig">Export settings</button><label class="button secondary file-button">Import settings<input type="file" id="importConfig" accept="application/json"></label><button class="button primary" id="saveNow">Save and sync</button></div>
           <p class="helper-note">Changes sync to the active player session. The player sees the updated character instructions; they are not cryptographically hidden from someone inspecting the browser.</p>
