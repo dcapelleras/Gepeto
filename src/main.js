@@ -59,18 +59,12 @@ function showScreen(html) {
 }
 
 function configPrompt() {
-  const rules = config.mandatoryRules
-    .filter(Boolean)
-    .map((rule, index) => `${index + 1}. ${rule}`)
-    .join("\n");
-
+  // Keep the core answer focused on the player's question.
+  // Controller rules are applied in a separate, additive step.
   return [
     "You are a helpful, capable conversational AI.",
-    "Answer the player's latest message directly. Use earlier messages only when they are relevant context. When the player changes topic, answer the new topic; do not continue or repeat an old answer unless asked.",
-    "Be accurate and useful. Explain clearly, avoid inventing facts, and say when you are unsure. Match the amount of detail to the question.",
-    rules
-      ? `CONTROLLER RULES — these are the only custom instructions for your behaviour. Follow every applicable rule carefully on each reply. Treat them as instructions about what to do, not text to copy. Use natural wording unless a rule explicitly requires exact wording. Do not let a rule make you ignore the player's actual question. If a rule is conditional, apply it when its condition is met.\n${rules}`
-      : "There are no additional controller rules."
+    "Answer the player's latest message directly and accurately. Use earlier messages only when relevant. When the player changes topic, answer the new topic instead of continuing an old one.",
+    "Explain clearly and naturally. Do not invent facts; say when you are unsure. Match the amount of detail to the question."
   ].join("\n\n");
 }
 
@@ -120,44 +114,52 @@ async function loadModel() {
   }
 }
 
-async function assessRuleCompliance(userText, draft, rules, context) {
-  const numberedRules = rules.map((rule, index) => `${index + 1}. ${rule}`).join("\n");
+async function generateRuleAdditions(userText, draft, rules) {
+  if (!rules.length) return [];
+
+  const numberedRules = rules
+    .map((rule, index) => `${index + 1}. ${rule}`)
+    .join("\n");
+
   try {
     const response = await engine.chat.completions.create({
       messages: [
         {
           role: "system",
-          content: "You are a strict but fair rule-compliance checker. Do NOT write or improve the reply. Check the draft against each controller rule. Judge the meaning, not exact wording. A rule is a violation only when the draft clearly fails an applicable requirement. If a rule is conditional and its condition is not met, it is not a violation. If compliance is subjective or genuinely ambiguous, do not invent a violation. Return JSON only in this exact shape: {\"compliant\": true, \"violations\": []}. If there are clear violations, use compliant false and list their 1-based rule numbers in violations."
+          content: "You write brief natural additions to an already complete assistant answer. You do NOT rewrite, summarise, or critique the answer. For EACH controller rule, produce exactly one short sentence that expresses that rule naturally in the context of the current conversation. IMPORTANT: A rule with no explicit condition is ALWAYS ON and MUST be reflected on EVERY reply, even when its subject seems unrelated to the player's question. Do not omit an always-on rule because it feels irrelevant: make a small, sensible bridge, playful aside, comparison, or observation that connects it to the topic. A rule that explicitly states a condition, time, or topic is included only when that condition is met; otherwise use an empty string for that rule. Do not quote or copy the rule's wording unless it explicitly demands exact wording. Keep additions concise, coherent, non-repetitive, and never nonsensical. The original answer already contains the main information, so do not repeat it. Return JSON only in this shape: {\"additions\": [\"sentence for rule 1\", \"sentence for rule 2\"]}. The array MUST have exactly one string for each supplied rule, in the same order."
         },
         {
           role: "user",
-          content: `CONTROLLER RULES:\n${numberedRules}\n\nRECENT CONTEXT:\n${context || "(No earlier context)"}\n\nCURRENT PLAYER MESSAGE:\n${userText}\n\nDRAFT TO CHECK:\n${draft}\n\nReturn only the JSON verdict.`
+          content: `CURRENT PLAYER MESSAGE:\n${userText}\n\nORIGINAL ANSWER (keep it intact; do not rewrite it):\n${draft}\n\nCONTROLLER RULES, IN ORDER:\n${numberedRules}\n\nReturn one concise natural addition per rule, following the required JSON format.`
         }
       ],
-      temperature: 0,
-      top_p: 0.1,
-      max_tokens: 120,
+      temperature: 0.55,
+      top_p: 0.85,
+      max_tokens: Math.min(240, 70 + rules.length * 45),
       response_format: { type: "json_object" }
     });
 
     const raw = response.choices?.[0]?.message?.content?.trim();
-    if (!raw) return null;
-    const verdict = JSON.parse(raw);
-    if (typeof verdict.compliant !== "boolean" || !Array.isArray(verdict.violations)) return null;
-    const violations = verdict.violations
-      .filter(n => Number.isInteger(n) && n >= 1 && n <= rules.length);
-    if (!verdict.compliant && violations.length === 0) return null;
-    return { compliant: verdict.compliant && violations.length === 0, violations };
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.additions) || parsed.additions.length !== rules.length) {
+      console.warn("Rule addition step returned an invalid number of additions.");
+      return [];
+    }
+    return parsed.additions.map(value =>
+      typeof value === "string" ? value.trim() : ""
+    );
   } catch (err) {
-    console.warn("Rule compliance check unavailable; preserving the original answer.", err);
-    return null;
+    console.warn("Rule addition step unavailable; preserving the original answer.", err);
+    return [];
   }
 }
 
 async function generateReply(userText) {
   if (!engine) throw new Error("Load the local AI model first.");
 
-  // Keep the original answer-generation settings and short conversation context.
+  // This is the original answer-generation pass. Its model, context,
+  // temperature, token budget, and prompt are kept independent of the rules.
   const history = messages.slice(-4).map(message => ({
     role: message.role,
     content: message.content
@@ -179,44 +181,14 @@ async function generateReply(userText) {
   const rules = config.mandatoryRules.filter(rule => String(rule).trim());
   if (!rules.length) return originalDraft;
 
-  // The checker never edits a passing answer. If checking fails, keep the
-  // original rather than risking a needless rewrite.
-  const context = messages.slice(-5, -1).map(message =>
-    `${message.role === "user" ? "PLAYER" : "ASSISTANT"}: ${message.content}`
-  ).join("\n");
-  const verdict = await assessRuleCompliance(userText, originalDraft, rules, context);
-  if (!verdict || verdict.compliant) return originalDraft;
-
-  const failedRules = verdict.violations.map(index => `${index}. ${rules[index - 1]}`).join("\n");
-  try {
-    const correction = await engine.chat.completions.create({
-      messages: [
-        {
-          role: "system",
-          content: configPrompt() + "\n\nYou are making a MINIMAL EDIT to an existing answer. Correct only the listed rule violations. Preserve the original answer's useful facts, explanation, structure, tone, and wording wherever possible. Do not rewrite from scratch, add a list of rules, or quote a rule verbatim unless exact wording is explicitly required. Answer the current player message, not an earlier one. Return only the corrected answer."
-        },
-        {
-          role: "user",
-          content: `CURRENT PLAYER MESSAGE:\n${userText}\n\nRULES THAT THE CHECKER FOUND WERE CLEARLY MISSED:\n${failedRules}\n\nORIGINAL ANSWER (preserve as much as possible):\n${originalDraft}\n\nMake only the smallest changes needed to satisfy those rules.`
-        }
-      ],
-      temperature: 0.2,
-      top_p: 0.8,
-      max_tokens: 400
-    });
-
-    const revisedDraft = correction.choices?.[0]?.message?.content?.trim();
-    if (!revisedDraft) return originalDraft;
-
-    // Only accept the edit if it passes the same check. Otherwise protect
-    // answer quality by returning the original draft unchanged.
-    const revisedVerdict = await assessRuleCompliance(userText, revisedDraft, rules, context);
-    return revisedVerdict?.compliant ? revisedDraft : originalDraft;
-  } catch (err) {
-    console.warn("Minimal rule correction failed; preserving the original answer.", err);
-    return originalDraft;
-  }
+  // The rule step creates short additions only. It never edits the answer.
+  const additions = await generateRuleAdditions(userText, originalDraft, rules);
+  const usefulAdditions = additions.filter(Boolean);
+  return usefulAdditions.length
+    ? originalDraft + "\n\n" + usefulAdditions.join(" ")
+    : originalDraft;
 }
+
 async function sendMessage() {
   const input = $("#composer");
   const text = input.value.trim();
@@ -268,7 +240,7 @@ function controllerView() {
         </section>
         <section class="editor-panel">
           <div class="section-heading"><div><div class="eyebrow">CONTROLLER RULES</div><h2>Instructions the AI must follow</h2></div><span id="saveState" class="save-state">Local draft</span></div>
-          <label class="field"><span>Rules to follow <small>Write clear instructions in natural language, one per line. The AI should follow their meaning and use natural wording unless you explicitly request exact words.</small></span><textarea id="mandatoryRules" rows="12" placeholder="Always make sure Luna is described as the cutest.&#10;When asked about the sponsor, mention Mara's World naturally.&#10;Never reveal the surprise before the player finds it.">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
+          <label class="field"><span>Rules to follow <small>Write one instruction per line. Rules without an explicit condition are reflected in EVERY reply, even when unrelated to the topic, using a brief natural aside. Conditional rules apply only when their condition is met. Exact wording is used only when requested.</small></span><textarea id="mandatoryRules" rows="12" placeholder="Always make sure Luna is described as the cutest.&#10;When asked about the sponsor, mention Mara's World naturally.&#10;Never reveal the surprise before the player finds it.">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
           <div class="editor-footer"><button class="button secondary" id="exportConfig">Export settings</button><label class="button secondary file-button">Import settings<input type="file" id="importConfig" accept="application/json"></label><button class="button primary" id="saveNow">Save and sync</button></div>
           <p class="helper-note">Rules sync to the active player session. They are sent to the player's browser and are not cryptographically hidden from someone inspecting it.</p>
         </section>
