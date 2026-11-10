@@ -52,7 +52,8 @@ function setStatus(message, kind = "") {
   const el = $("#status");
   if (!el) return;
   el.textContent = message;
-  el.className = `status ${kind}`;
+  el.classList.remove("success", "error");
+  if (kind) el.classList.add(kind);
 }
 
 function showScreen(html) {
@@ -68,7 +69,7 @@ function configPrompt() {
     "Follow the character settings consistently while remaining truthful about being an AI when directly asked.",
     `Warmth: ${s.warmth}/100. Playfulness: ${s.playfulness}/100. Confidence: ${s.confidence}/100. Verbosity: ${s.verbosity}/100. Mischief: ${s.mischief}/100.`,
     "Use warmth and playfulness proportionally to their settings. Higher verbosity means fuller answers; lower verbosity means concise answers. Confidence controls how decisive your tone sounds, not whether you invent facts. Mischief means harmless theatrical silliness, never pressure or harmful advice.",
-    quirks ? `SPECIAL QUIRKS — try to incorporate these naturally when relevant:\n${quirks}` : "",
+    quirks ? `MANDATORY CHARACTER RULES — obey every custom quirk on every reply. Treat each line below as a binding requirement, not a suggestion. Do not ignore a rule merely because the user's question is unrelated. Check your draft against every rule before responding:\n${quirks}` : "",
     "This is entertainment. Do not pressure the user or present fictional roleplay as real-world authority."
   ].filter(Boolean).join("\n\n");
 }
@@ -293,17 +294,30 @@ async function toggleCurrentSession() {
 
 async function saveDraft() {
   localStorage.setItem("gepeto-config", JSON.stringify(config));
-  if (sessionId) {
-    try {
+  const saveButton = $("#saveNow");
+  if (saveButton) {
+    saveButton.disabled = true;
+    saveButton.textContent = "Saving…";
+  }
+  try {
+    if (sessionId) {
       await saveConfig(sessionId, config);
       $("#saveState").textContent = "Synced";
       $("#saveState").classList.remove("unsaved");
-      setStatus("Character settings synchronised.", "success");
-    } catch (err) {
-      setStatus(`Could not sync settings: ${err.message}`, "error");
+      setStatus("Character settings saved and synced to the player.", "success");
+    } else {
+      $("#saveState").textContent = "Saved locally — no session selected";
+      setStatus("Saved on this device only. Create an invitation or select a session to sync.", "error");
     }
-  } else {
-    $("#saveState").textContent = "Saved locally — create a session to sync";
+  } catch (err) {
+    $("#saveState").textContent = "Sync failed — try again";
+    $("#saveState").classList.add("unsaved");
+    setStatus(`Could not sync settings: ${err.message}`, "error");
+  } finally {
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = "Save and sync";
+    }
   }
 }
 
