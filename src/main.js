@@ -121,7 +121,7 @@ async function loadModel() {
 }
 
 async function assessRuleCompliance(userText, draft, rules, context) {
-  const numberedRules = rules.map((rule, index) => `${index + 1}. ${rule}`).join("\\n");
+  const numberedRules = rules.map((rule, index) => `${index + 1}. ${rule}`).join("\n");
   try {
     const response = await engine.chat.completions.create({
       messages: [
@@ -131,7 +131,7 @@ async function assessRuleCompliance(userText, draft, rules, context) {
         },
         {
           role: "user",
-          content: `CONTROLLER RULES:\\n${numberedRules}\\n\\nRECENT CONTEXT:\\n${context || "(No earlier context)"}\\n\\nCURRENT PLAYER MESSAGE:\\n${userText}\\n\\nDRAFT TO CHECK:\\n${draft}\\n\\nReturn only the JSON verdict.`
+          content: `CONTROLLER RULES:\n${numberedRules}\n\nRECENT CONTEXT:\n${context || "(No earlier context)"}\n\nCURRENT PLAYER MESSAGE:\n${userText}\n\nDRAFT TO CHECK:\n${draft}\n\nReturn only the JSON verdict.`
         }
       ],
       temperature: 0,
@@ -146,6 +146,7 @@ async function assessRuleCompliance(userText, draft, rules, context) {
     if (typeof verdict.compliant !== "boolean" || !Array.isArray(verdict.violations)) return null;
     const violations = verdict.violations
       .filter(n => Number.isInteger(n) && n >= 1 && n <= rules.length);
+    if (!verdict.compliant && violations.length === 0) return null;
     return { compliant: verdict.compliant && violations.length === 0, violations };
   } catch (err) {
     console.warn("Rule compliance check unavailable; preserving the original answer.", err);
@@ -182,21 +183,21 @@ async function generateReply(userText) {
   // original rather than risking a needless rewrite.
   const context = messages.slice(-5, -1).map(message =>
     `${message.role === "user" ? "PLAYER" : "ASSISTANT"}: ${message.content}`
-  ).join("\\n");
+  ).join("\n");
   const verdict = await assessRuleCompliance(userText, originalDraft, rules, context);
   if (!verdict || verdict.compliant) return originalDraft;
 
-  const failedRules = verdict.violations.map(index => `${index}. ${rules[index - 1]}`).join("\\n");
+  const failedRules = verdict.violations.map(index => `${index}. ${rules[index - 1]}`).join("\n");
   try {
     const correction = await engine.chat.completions.create({
       messages: [
         {
           role: "system",
-          content: configPrompt() + "\\n\\nYou are making a MINIMAL EDIT to an existing answer. Correct only the listed rule violations. Preserve the original answer's useful facts, explanation, structure, tone, and wording wherever possible. Do not rewrite from scratch, add a list of rules, or quote a rule verbatim unless exact wording is explicitly required. Answer the current player message, not an earlier one. Return only the corrected answer."
+          content: configPrompt() + "\n\nYou are making a MINIMAL EDIT to an existing answer. Correct only the listed rule violations. Preserve the original answer's useful facts, explanation, structure, tone, and wording wherever possible. Do not rewrite from scratch, add a list of rules, or quote a rule verbatim unless exact wording is explicitly required. Answer the current player message, not an earlier one. Return only the corrected answer."
         },
         {
           role: "user",
-          content: `CURRENT PLAYER MESSAGE:\\n${userText}\\n\\nRULES THAT THE CHECKER FOUND WERE CLEARLY MISSED:\\n${failedRules}\\n\\nORIGINAL ANSWER (preserve as much as possible):\\n${originalDraft}\\n\\nMake only the smallest changes needed to satisfy those rules.`
+          content: `CURRENT PLAYER MESSAGE:\n${userText}\n\nRULES THAT THE CHECKER FOUND WERE CLEARLY MISSED:\n${failedRules}\n\nORIGINAL ANSWER (preserve as much as possible):\n${originalDraft}\n\nMake only the smallest changes needed to satisfy those rules.`
         }
       ],
       temperature: 0.2,
