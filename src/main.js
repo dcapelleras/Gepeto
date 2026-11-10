@@ -83,37 +83,6 @@ function activeTrigger(userText) {
     lower.includes(t.phrase.toLowerCase()));
 }
 
-function normalizedReply(text) {
-  return String(text || "")
-    .toLocaleLowerCase()
-    .normalize("NFKC")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
-}
-
-function isRepeatRequest(userText) {
-  return /\b(repeat|say that again|repeat that|copy that|quote that|same answer)\b/i.test(userText);
-}
-
-function repeatsRecentAnswer(candidate, userText) {
-  if (!candidate || isRepeatRequest(userText)) return false;
-  const candidateText = normalizedReply(candidate);
-  const candidateWords = new Set(candidateText.split(/\s+/).filter(Boolean));
-  if (!candidateText) return false;
-
-  return messages.filter(m => m.role === "assistant").slice(-5).some(previous => {
-    const previousText = normalizedReply(previous.content);
-    if (!previousText) return false;
-    if (candidateText === previousText) return true;
-
-    const previousWords = new Set(previousText.split(/\s+/).filter(Boolean));
-    if (candidateWords.size < 8 || previousWords.size < 8) return false;
-    let overlap = 0;
-    for (const word of candidateWords) if (previousWords.has(word)) overlap++;
-    const similarity = overlap / (candidateWords.size + previousWords.size - overlap);
-    return similarity >= 0.88;
-  });
-}
 
 function renderMessages() {
   const list = $("#messages");
@@ -167,69 +136,24 @@ async function generateReply(userText) {
   const triggerPrompt = triggers.length
     ? "\n\nTriggered special instructions for this reply:\n" + triggers.map(t => "- " + t.instruction).join("\n")
     : "";
-  const history = messages.slice(-12).map(m => ({ role: m.role, content: m.content }));
-  const systemPrompt = configPrompt() + triggerPrompt;
 
-  const request = async (extraInstruction = "", temperature = 0.8) => {
-    const response = await engine.chat.completions.create({
-      messages: [
-        { role: "system", content: systemPrompt + extraInstruction },
-        ...history
-      ],
-      temperature,
-      top_p: 0.9,
-      max_tokens: 400
-    });
-    return response.choices?.[0]?.message?.content?.trim() || "";
-  };
+  // Keep only the latest three exchanges. Long transcripts can distract
+  // small local models and encourage them to copy an earlier assistant reply.
+  const history = messages.slice(-6).map(m => ({ role: m.role, content: m.content }));
+  const systemPrompt = configPrompt() + triggerPrompt + "\n\nCURRENT-TURN PRIORITY: Answer the player's newest message at the end of the conversation. Earlier messages are context only. Do not continue, repeat, or paste an earlier assistant answer unless the player explicitly asks you to repeat it. Apply character preferences naturally while still answering the actual question.";
 
-  let draft = await request();
-  if (!draft) draft = "I seem to have lost my train of thought. Try again?";
+  const response = await engine.chat.completions.create({
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...history
+    ],
+    temperature: 0.7,
+    top_p: 0.9,
+    max_tokens: 400
+  });
 
-  // Small local models sometimes repeat a previous answer instead of responding
-  // to the newest message. Give that failure one fresh attempt before displaying it.
-  if (repeatsRecentAnswer(draft, userText)) {
-    const retry = await request(
-      "\n\nIMPORTANT: Your next reply must answer the PLAYER'S MOST RECENT MESSAGE at the end of the conversation. Do not repeat or reuse an earlier assistant answer. Treat earlier messages as context only. Answer the current question directly.",
-      0.55
-    );
-    if (retry && !repeatsRecentAnswer(retry, userText)) {
-      draft = retry;
-    } else {
-      return "Sorry — I seem to have repeated an earlier answer by mistake. Could you ask me that again?";
-    }
-  }
-
-  if (!config.mandatoryRules.some(rule => String(rule).trim())) return draft;
-
-  // Review in a clean editing prompt. Keep the current question and draft
-  // together so the model does not mistake the review request for a new topic.
-  try {
-    const priorContext = messages.slice(-9, -1).map(m =>
-      `${m.role === "user" ? "PLAYER" : "CHARACTER"}: ${m.content}`
-    ).join("\n");
-    const reviewed = await engine.chat.completions.create({
-      messages: [
-        {
-          role: "system",
-          content: configPrompt() + "\n\nYou are editing a draft response, not starting a new conversation. Keep the answer focused on the CURRENT PLAYER MESSAGE. Apply every mandatory rule naturally. Preserve the draft's useful information and character voice. Do not copy or append rule text unless exact wording is explicitly required. Do not answer an earlier question. Make only the changes needed for rule compliance and clarity. Return only the final response."
-        },
-        {
-          role: "user",
-          content: `RECENT CONTEXT (for reference only):\n${priorContext || "(No earlier conversation)"}\n\nCURRENT PLAYER MESSAGE:\n${userText}\n\nDRAFT RESPONSE TO REVIEW:\n${draft}\n\nReturn the improved response to the current player message only.`
-        }
-      ],
-      temperature: 0.2,
-      top_p: 0.9,
-      max_tokens: 400
-    });
-    const finalReply = reviewed.choices?.[0]?.message?.content?.trim();
-    // Never let the review stage replace a current answer with an old reply.
-    return finalReply && !repeatsRecentAnswer(finalReply, userText) ? finalReply : draft;
-  } catch (err) {
-    console.warn("Mandatory-rule review pass failed; using the original draft.", err);
-    return draft;
-  }
+  return response.choices?.[0]?.message?.content?.trim() ||
+    "I seem to have lost my train of thought. Could you ask me that again?";
 }
 async function sendMessage() {
   const input = $("#composer");
