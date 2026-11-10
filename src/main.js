@@ -114,52 +114,37 @@ async function loadModel() {
   }
 }
 
-async function generateRuleAdditions(userText, draft, rules) {
-  if (!rules.length) return [];
+async function generateRuleAside(userText, draft, rules) {
+  if (!rules.length) return "";
 
   const numberedRules = rules
     .map((rule, index) => `${index + 1}. ${rule}`)
     .join("\n");
 
-  try {
-    const response = await engine.chat.completions.create({
-      messages: [
-        {
-          role: "system",
-          content: "You write brief natural additions to an already complete assistant answer. You do NOT rewrite, summarise, or critique the answer. For EACH controller rule, produce exactly one short sentence that expresses that rule naturally in the context of the current conversation. IMPORTANT: A rule with no explicit condition is ALWAYS ON and MUST be reflected on EVERY reply, even when its subject seems unrelated to the player's question. Do not omit an always-on rule because it feels irrelevant: make a small, sensible bridge, playful aside, comparison, or observation that connects it to the topic. A rule that explicitly states a condition, time, or topic is included only when that condition is met; otherwise use an empty string for that rule. Do not quote or copy the rule's wording unless it explicitly demands exact wording. Keep additions concise, coherent, non-repetitive, and never nonsensical. The original answer already contains the main information, so do not repeat it. Return JSON only in this shape: {\"additions\": [\"sentence for rule 1\", \"sentence for rule 2\"]}. The array MUST have exactly one string for each supplied rule, in the same order."
-        },
-        {
-          role: "user",
-          content: `CURRENT PLAYER MESSAGE:\n${userText}\n\nORIGINAL ANSWER (keep it intact; do not rewrite it):\n${draft}\n\nCONTROLLER RULES, IN ORDER:\n${numberedRules}\n\nReturn one concise natural addition per rule, following the required JSON format.`
-        }
-      ],
-      temperature: 0.55,
-      top_p: 0.85,
-      max_tokens: Math.min(240, 70 + rules.length * 45),
-      response_format: { type: "json_object" }
-    });
+  const response = await engine.chat.completions.create({
+    messages: [
+      {
+        role: "system",
+        content: "You write the SECOND message in a two-part assistant reply. The first message has already answered the player's question correctly. Your job is NOT to answer the question again. Your only job is to express the controller's rules in a short, natural, relevant aside that connects to the player's latest question or the first answer. EVERY rule without an explicit condition is compulsory in THIS second message, even when unrelated to the question. Do not decide that a rule is irrelevant. Find a simple, sensible link to the topic. For example, if the rule says Luna is the cutest and the question is about the weather, you can say that even gloomy weather feels better when Luna is around being adorable. If there are multiple rules, include all of them in one coherent aside. Do not simply repeat the rule as written; express its meaning naturally. Keep this second message short (usually one or two sentences), clear, and not silly or nonsensical. Do not repeat the factual answer. Do not mention that you are following rules. Return only the second message, with no label, JSON, bullet list, or explanation."
+      },
+      {
+        role: "user",
+        content: `PLAYER'S LATEST QUESTION:\n${userText}\n\nTHE MAIN ANSWER ALREADY GIVEN:\n${draft}\n\nCONTROLLER RULES THAT MUST ALL APPEAR IN THIS SECOND MESSAGE:\n${numberedRules}\n\nWrite the separate rule-related follow-up message now. Make a natural connection to the question or answer, and visibly express every rule.`
+      }
+    ],
+    temperature: 0.65,
+    top_p: 0.9,
+    max_tokens: 160
+  });
 
-    const raw = response.choices?.[0]?.message?.content?.trim();
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.additions) || parsed.additions.length !== rules.length) {
-      console.warn("Rule addition step returned an invalid number of additions.");
-      return [];
-    }
-    return parsed.additions.map(value =>
-      typeof value === "string" ? value.trim() : ""
-    );
-  } catch (err) {
-    console.warn("Rule addition step unavailable; preserving the original answer.", err);
-    return [];
-  }
+  const aside = response.choices?.[0]?.message?.content?.trim() || "";
+  return aside;
 }
 
 async function generateReply(userText) {
   if (!engine) throw new Error("Load the local AI model first.");
 
-  // This is the original answer-generation pass. Its model, context,
-  // temperature, token budget, and prompt are kept independent of the rules.
+  // Keep the good answer-generation pass unchanged.
   const history = messages.slice(-4).map(message => ({
     role: message.role,
     content: message.content
@@ -175,18 +160,24 @@ async function generateReply(userText) {
     max_tokens: 400
   });
 
-  const originalDraft = response.choices?.[0]?.message?.content?.trim() ||
+  const answer = response.choices?.[0]?.message?.content?.trim() ||
     "I couldn't form a useful answer just now. Could you try asking in a different way?";
 
   const rules = config.mandatoryRules.filter(rule => String(rule).trim());
-  if (!rules.length) return originalDraft;
+  if (!rules.length) return { answer, ruleAside: "" };
 
-  // The rule step creates short additions only. It never edits the answer.
-  const additions = await generateRuleAdditions(userText, originalDraft, rules);
-  const usefulAdditions = additions.filter(Boolean);
-  return usefulAdditions.length
-    ? originalDraft + "\n\n" + usefulAdditions.join(" ")
-    : originalDraft;
+  // Ask for a separate rule-focused follow-up. The main answer is never
+  // passed back for editing and remains exactly as originally generated.
+  try {
+    const ruleAside = await generateRuleAside(userText, answer, rules);
+    return { answer, ruleAside };
+  } catch (err) {
+    console.warn("Could not generate the separate rule-related message.", err);
+    return {
+      answer,
+      ruleAside: "I couldn't generate the additional rule-related message this time."
+    };
+  }
 }
 
 async function sendMessage() {
@@ -209,9 +200,12 @@ async function sendMessage() {
   typing.textContent = `${APP_NAME} is thinking…`;
   $("#messages").append(typing);
   try {
-    const reply = await generateReply(text);
+    const result = await generateReply(text);
     $("#typing")?.remove();
-    appendMessage("assistant", reply, true);
+    appendMessage("assistant", result.answer, true);
+    if (result.ruleAside) {
+      appendMessage("assistant", result.ruleAside, true);
+    }
   } catch (err) {
     $("#typing")?.remove();
     setStatus(err.message, "error");
