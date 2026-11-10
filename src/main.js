@@ -143,16 +143,18 @@ async function generateRuleAside(userText, draft, rules) {
   for (const rule of rules) {
     try {
       let sentence = await generateOneRuleAside(userText, draft, rule);
-      if (!sentence || sentence === "[SKIP]") {
-        // One brief retry for unconditional rules or accidental empty output.
+      const explicitlyConditional = /\\b(if|when|unless|only when|whenever|in case|provided that)\\b/i.test(rule);
+      if (!sentence || (sentence === "[SKIP]" && !explicitlyConditional)) {
+        // Retry empty output or an improper skip, but respect real conditions.
         const retry = await generateOneRuleAside(
           userText,
           draft,
-          `This is an unconditional rule. It applies to this reply even if unrelated to the topic: ${rule}`
+          `This rule is unconditional and applies to this reply even if unrelated to the topic: ${rule}`
         );
         sentence = retry;
       }
-      if (sentence && sentence !== "[SKIP]") sentences.push(sentence);
+      if (!sentence) return null;
+      if (sentence !== "[SKIP]") sentences.push(sentence);
     } catch (err) {
       console.warn("Could not generate one rule-related sentence.", err);
       return null;
@@ -193,7 +195,7 @@ async function generateReply(userText) {
     const generatedAside = await generateRuleAside(userText, answer, rules);
     const ruleAside = generatedAside === null
       ? "I couldn't generate the rule-related follow-up this time."
-      : generatedAside || "I couldn't produce the rule-related follow-up for this message.";
+      : generatedAside;
     return { answer, ruleAside };
   } catch (err) {
     console.warn("Could not generate the separate rule-related message.", err);
