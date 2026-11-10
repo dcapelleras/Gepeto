@@ -114,6 +114,7 @@ async function loadModel() {
     });
     $("#modelButton").textContent = "AI ready";
     $("#modelButton").classList.add("ready");
+    $("#engineStatus").textContent = "Local AI ready";
     setStatus("Local AI is ready.", "success");
   } catch (err) {
     console.error(err);
@@ -187,7 +188,7 @@ function controllerView() {
           <p>Change the personality, add peculiar rules, and watch the player's experience update live.</p>
           <div class="session-card">
             <div class="session-card-head"><div><div class="eyebrow">PLAYER CONNECTION</div><h2>Your session</h2></div><span class="live-dot">Ready</span></div>
-            <div class="session-actions"><button class="button primary" id="createInvite">Create player invitation</button><button class="button secondary" id="refreshSessions">Refresh sessions</button></div>
+            <div class="session-actions"><button class="button primary" id="createInvite">Create player invitation</button><button class="button secondary" id="refreshSessions">Refresh sessions</button><button class="button secondary" id="toggleSession" disabled>Pause / resume</button></div>
             <div id="inviteOutput" class="invite-output hidden"></div>
             <div id="sessionList" class="session-list"></div>
           </div>
@@ -231,6 +232,9 @@ function bindController() {
         await navigator.clipboard.writeText(result.inviteUrl);
         setStatus("Invitation copied.", "success");
       };
+      $("#toggleSession").disabled = false;
+      $("#toggleSession").textContent = "Pause session";
+      $("#toggleSession").onclick = () => toggleCurrentSession();
       await refreshSessions();
       setStatus("Player invitation created.", "success");
     } catch (err) { setStatus(err.message, "error"); }
@@ -275,7 +279,20 @@ function bindController() {
   refreshSessions();
 }
 
+async function toggleCurrentSession() {
+  if (!sessionId) return;
+  try {
+    const current = await getSession(sessionId);
+    const next = current.status === "active" ? "paused" : "active";
+    await setSessionStatus(sessionId, next);
+    $("#toggleSession").textContent = next === "active" ? "Pause session" : "Resume session";
+    setStatus(next === "active" ? "Session resumed." : "Session paused.", "success");
+    await refreshSessions();
+  } catch (err) { setStatus(err.message, "error"); }
+}
+
 async function saveDraft() {
+  localStorage.setItem("gepeto-config", JSON.stringify(config));
   if (sessionId) {
     try {
       await saveConfig(sessionId, config);
@@ -300,7 +317,11 @@ async function refreshSessions() {
       localStorage.setItem("gepeto-controller-session", sessionId);
       const s = await getSession(sessionId);
       config = mergeConfig(s.active_config);
+      localStorage.setItem("gepeto-config", JSON.stringify(config));
       controllerView();
+      $("#toggleSession").disabled = false;
+      $("#toggleSession").textContent = s.status === "active" ? "Pause session" : "Resume session";
+      $("#toggleSession").onclick = () => toggleCurrentSession();
       setStatus("Editing selected session.", "success");
     });
   } catch (err) { setStatus(err.message, "error"); }
@@ -399,7 +420,9 @@ async function boot() {
   }
 
   if (session?.user && !session.user.is_anonymous) {
-    config = mergeConfig();
+    try { config = mergeConfig(JSON.parse(localStorage.getItem("gepeto-config") || "{}")); }
+    catch { config = mergeConfig(); }
+    sessionId = localStorage.getItem("gepeto-controller-session") || null;
     controllerView();
     return;
   }
