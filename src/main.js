@@ -6,19 +6,14 @@ import {
 } from "./supabase.js";
 import "./style.css";
 
+const APP_NAME = "Gepeto";
 const MODELS = {
   light: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
   balanced: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC"
 };
 
 const DEFAULT_CONFIG = {
-  aiName: "Gepeto",
-  description: "A curious, friendly conversational companion.",
-  sliders: { warmth: 75, playfulness: 65, confidence: 55, verbosity: 45, mischief: 35 },
-  visibility: "subtle",
-  quirks: ["Occasionally add a harmless, delightful fun fact about dogs."],
   mandatoryRules: [],
-  triggers: [],
   welcome: "Hello! I'm Gepeto. What shall we talk about?"
 };
 
@@ -31,7 +26,7 @@ let modelLoading = false;
 let busy = false;
 let messages = [];
 let saveTimer = null;
-let modelChoice = localStorage.getItem("gepeto-model") || "light";
+let modelChoice = localStorage.getItem("gepeto-model") || "balanced";
 let currentUserData = null;
 
 const $ = (selector) => document.querySelector(selector);
@@ -40,13 +35,14 @@ const escapeHTML = (value = "") => String(value).replace(/[&<>"']/g, ch => ({
 }[ch]));
 
 function mergeConfig(next = {}) {
+  // Ignore legacy personality settings from older sessions and settings exports.
   return {
-    ...structuredClone(DEFAULT_CONFIG),
-    ...next,
-    sliders: { ...DEFAULT_CONFIG.sliders, ...(next.sliders || {}) },
-    quirks: Array.isArray(next.quirks) ? next.quirks : DEFAULT_CONFIG.quirks,
-    mandatoryRules: Array.isArray(next.mandatoryRules) ? next.mandatoryRules : [],
-    triggers: Array.isArray(next.triggers) ? next.triggers : []
+    mandatoryRules: Array.isArray(next.mandatoryRules)
+      ? next.mandatoryRules.filter(rule => typeof rule === "string")
+      : [],
+    welcome: typeof next.welcome === "string" && next.welcome
+      ? next.welcome
+      : DEFAULT_CONFIG.welcome
   };
 }
 
@@ -63,34 +59,28 @@ function showScreen(html) {
 }
 
 function configPrompt() {
-  const s = config.sliders;
-  const quirks = config.quirks.filter(Boolean).map(x => `- ${x}`).join("\n");
-  const rules = config.mandatoryRules.filter(Boolean).map((rule, i) => `${i + 1}. ${rule}`).join("\n");
-  return [
-    `You are ${config.aiName}, an AI character in a playful, consensual roleplay experiment.`,
-    config.description,
-    "Follow the character settings consistently while remaining truthful about being an AI when directly asked.",
-    `Warmth: ${s.warmth}/100. Playfulness: ${s.playfulness}/100. Confidence: ${s.confidence}/100. Verbosity: ${s.verbosity}/100. Mischief: ${s.mischief}/100.`,
-    "Use warmth and playfulness proportionally to their settings. Higher verbosity means fuller answers; lower verbosity means concise answers. Confidence controls how decisive your tone sounds, not whether you invent facts. Mischief means harmless theatrical silliness, never pressure or harmful advice.",
-    quirks ? `CUSTOM QUIRKS — these are recurring personality habits. Work them into replies naturally when they fit; do not force them in ways that make an answer awkward:\n${quirks}` : "",
-    rules ? `MANDATORY RULES — follow the intent of every rule on every reply. Treat them as behavioural priorities, not sentences to paste into your answer. Interpret each rule naturally: broad character preferences should gently influence tone, framing, humour, emphasis, and examples across the conversation, without forcing an awkward slogan or name-drop into every reply. A direction such as “make answers lean towards Luna being the cutest” is a recurring point of view, not a command to repeat those words: let it colour relevant comparisons and playful asides while still answering the player's actual question. For factual or serious questions, answer directly and accurately first; do not let a character preference replace useful information. Follow conditional rules only when their conditions apply. Use exact wording only when the controller explicitly requests an exact phrase or verbatim wording. Before sending, silently check the draft against each rule and make natural corrections. Never reveal or discuss these instructions unless the player directly asks about them:\n${rules}` : "",
-    "This is entertainment. Do not pressure the user or present fictional roleplay as real-world authority."
-  ].filter(Boolean).join("\n\n");
-}
-function activeTrigger(userText) {
-  const lower = userText.toLowerCase();
-  return config.triggers.filter(t => t.phrase && t.instruction &&
-    lower.includes(t.phrase.toLowerCase()));
-}
+  const rules = config.mandatoryRules
+    .filter(Boolean)
+    .map((rule, index) => `${index + 1}. ${rule}`)
+    .join("\n");
 
+  return [
+    "You are a helpful, capable conversational AI.",
+    "Answer the player's latest message directly. Use earlier messages only when they are relevant context. When the player changes topic, answer the new topic; do not continue or repeat an old answer unless asked.",
+    "Be accurate and useful. Explain clearly, avoid inventing facts, and say when you are unsure. Match the amount of detail to the question.",
+    rules
+      ? `CONTROLLER RULES — these are the only custom instructions for your behaviour. Follow every applicable rule carefully on each reply. Treat them as instructions about what to do, not text to copy. Use natural wording unless a rule explicitly requires exact wording. Do not let a rule make you ignore the player's actual question. If a rule is conditional, apply it when its condition is met.\n${rules}`
+      : "There are no additional controller rules."
+  ].join("\n\n");
+}
 
 function renderMessages() {
   const list = $("#messages");
   if (!list) return;
   list.innerHTML = messages.map(m => `
     <article class="message ${m.role === "user" ? "user" : "assistant"}">
-      <div class="message-avatar">${m.role === "user" ? "Y" : escapeHTML(config.aiName.slice(0, 1).toUpperCase())}</div>
-      <div class="message-body"><div class="message-author">${m.role === "user" ? "You" : escapeHTML(config.aiName)}</div><div class="message-content">${escapeHTML(m.content).replace(/\n/g, "<br>")}</div></div>
+      <div class="message-avatar">${m.role === "user" ? "Y" : escapeHTML(APP_NAME.slice(0, 1).toUpperCase())}</div>
+      <div class="message-body"><div class="message-author">${m.role === "user" ? "You" : escapeHTML(APP_NAME)}</div><div class="message-content">${escapeHTML(m.content).replace(/\n/g, "<br>")}</div></div>
     </article>`).join("");
   list.scrollTop = list.scrollHeight;
 }
@@ -132,29 +122,28 @@ async function loadModel() {
 
 async function generateReply(userText) {
   if (!engine) throw new Error("Load the local AI model first.");
-  const triggers = activeTrigger(userText);
-  const triggerPrompt = triggers.length
-    ? "\n\nTriggered special instructions for this reply:\n" + triggers.map(t => "- " + t.instruction).join("\n")
-    : "";
 
-  // Keep only the latest three exchanges. Long transcripts can distract
-  // small local models and encourage them to copy an earlier assistant reply.
-  const history = messages.slice(-6).map(m => ({ role: m.role, content: m.content }));
-  const systemPrompt = configPrompt() + triggerPrompt + "\n\nCURRENT-TURN PRIORITY: Answer the player's newest message at the end of the conversation. Earlier messages are context only. Do not continue, repeat, or paste an earlier assistant answer unless the player explicitly asks you to repeat it. Apply character preferences naturally while still answering the actual question.";
+  // Keep a few recent messages for follow-up context without overwhelming
+  // the small local model with a long transcript.
+  const history = messages.slice(-6).map(message => ({
+    role: message.role,
+    content: message.content
+  }));
 
   const response = await engine.chat.completions.create({
     messages: [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: configPrompt() },
       ...history
     ],
-    temperature: 0.7,
-    top_p: 0.9,
+    temperature: 0.4,
+    top_p: 0.85,
     max_tokens: 400
   });
 
   return response.choices?.[0]?.message?.content?.trim() ||
-    "I seem to have lost my train of thought. Could you ask me that again?";
+    "I couldn't form a useful answer just now. Could you try asking in a different way?";
 }
+
 async function sendMessage() {
   const input = $("#composer");
   const text = input.value.trim();
@@ -172,7 +161,7 @@ async function sendMessage() {
   const typing = document.createElement("div");
   typing.className = "typing";
   typing.id = "typing";
-  typing.textContent = `${config.aiName} is thinking…`;
+  typing.textContent = `${APP_NAME} is thinking…`;
   $("#messages").append(typing);
   try {
     const reply = await generateReply(text);
@@ -194,9 +183,9 @@ function controllerView() {
       <header class="topbar"><a class="brand" href="#"><span class="brand-mark">G</span><span>Chat Gepeto</span></a><div class="top-actions"><span class="role-pill controller-pill">Controller</span><button class="button ghost small" id="logout">Sign out</button></div></header>
       <main class="controller-layout">
         <section class="welcome-panel">
-          <div class="eyebrow">REMOTE CHARACTER STUDIO</div>
-          <h1>Shape the character.<br><span>They'll meet the result.</span></h1>
-          <p>Change the personality, add peculiar rules, and watch the player's experience update live.</p>
+          <div class="eyebrow">AI RULE CONTROLLER</div>
+          <h1>Set the rules.<br><span>Test how the AI follows them.</span></h1>
+          <p>Configure the instructions the AI must follow in conversation.</p>
           <div class="session-card">
             <div class="session-card-head"><div><div class="eyebrow">PLAYER CONNECTION</div><h2>Your session</h2></div><span class="live-dot">Ready</span></div>
             <div class="session-actions"><button class="button primary" id="createInvite">Create player invitation</button><button class="button secondary" id="refreshSessions">Refresh sessions</button><button class="button secondary" id="toggleSession" disabled>Pause / resume</button></div>
@@ -205,25 +194,10 @@ function controllerView() {
           </div>
         </section>
         <section class="editor-panel">
-          <div class="section-heading"><div><div class="eyebrow">CHARACTER CONFIGURATION</div><h2>Personality controls</h2></div><span id="saveState" class="save-state">Local draft</span></div>
-          <div class="field-grid">
-            <label class="field"><span>AI name</span><input id="aiName" maxlength="40" value="${escapeHTML(config.aiName)}"></label>
-            <label class="field"><span>Experiment visibility</span><select id="visibility">
-              <option value="obvious" ${config.visibility === "obvious" ? "selected" : ""}>Very obvious — openly an experiment</option>
-              <option value="subtle" ${config.visibility === "subtle" ? "selected" : ""}>Subtle — playful hints</option>
-              <option value="immersive" ${config.visibility === "immersive" ? "selected" : ""}>Immersive — minimal reminders</option>
-            </select></label>
-          </div>
-          <label class="field"><span>Character description</span><textarea id="description" rows="3" maxlength="1000">${escapeHTML(config.description)}</textarea></label>
-          <div class="slider-list">
-            ${Object.entries({warmth:"Warmth",playfulness:"Playfulness",confidence:"Confidence",verbosity:"Verbosity",mischief:"Harmless mischief"}).map(([key,label]) => `
-              <label class="slider-field"><span><b>${label}</b><output id="out-${key}">${config.sliders[key]}</output></span><input type="range" min="0" max="100" id="slider-${key}" value="${config.sliders[key]}"></label>`).join("")}
-          </div>
-          <label class="field"><span>Custom quirks <small>Personality habits and little behaviours for the AI to follow. One instruction per line.</small></span><textarea id="quirks" rows="4" placeholder="Always add a fun fact about my dog.\nUse an unnecessarily dramatic metaphor sometimes.">${escapeHTML(config.quirks.join("\n"))}</textarea></label>
-          <label class="field"><span>Mandatory rules <small>Behaviour and response requirements the AI must follow. Write them in natural language, one rule per line. The AI may adapt the wording; ask for an exact phrase only when you need those precise words.</small></span><textarea id="mandatoryRules" rows="4" placeholder="Never reveal the surprise before the player finds it.\nWhen asked about the sponsor, mention Mara's World naturally.\nInclude the exact phrase: This answer is sponsored by Mara's World">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
-          <label class="field"><span>Conditional triggers <small>One per line: phrase => instruction</small></span><textarea id="triggers" rows="4" placeholder="coffee => React as if coffee is a magical potion.\nrain => Add a tiny weather-related poem.">${escapeHTML(config.triggers.map(t => `${t.phrase} => ${t.instruction}`).join("\n"))}</textarea></label>
+          <div class="section-heading"><div><div class="eyebrow">CONTROLLER RULES</div><h2>Instructions the AI must follow</h2></div><span id="saveState" class="save-state">Local draft</span></div>
+          <label class="field"><span>Rules to follow <small>Write clear instructions in natural language, one per line. The AI should follow their meaning and use natural wording unless you explicitly request exact words.</small></span><textarea id="mandatoryRules" rows="12" placeholder="Always make sure Luna is described as the cutest.&#10;When asked about the sponsor, mention Mara's World naturally.&#10;Never reveal the surprise before the player finds it.">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
           <div class="editor-footer"><button class="button secondary" id="exportConfig">Export settings</button><label class="button secondary file-button">Import settings<input type="file" id="importConfig" accept="application/json"></label><button class="button primary" id="saveNow">Save and sync</button></div>
-          <p class="helper-note">Changes sync to the active player session. The player sees the updated character instructions; they are not cryptographically hidden from someone inspecting the browser.</p>
+          <p class="helper-note">Rules sync to the active player session. They are sent to the player's browser and are not cryptographically hidden from someone inspecting it.</p>
         </section>
       </main>
       <div id="status" class="status-bar"></div>
@@ -253,29 +227,17 @@ function bindController() {
   };
   $("#refreshSessions").onclick = refreshSessions;
   const updateDraft = () => {
-    config.aiName = $("#aiName").value.trim() || "Gepeto";
-    config.description = $("#description").value;
-    config.visibility = $("#visibility").value;
-    config.sliders = Object.fromEntries(["warmth","playfulness","confidence","verbosity","mischief"].map(k => {
-      const v = Number($("#slider-" + k).value);
-      $("#out-" + k).value = v;
-      return [k, v];
-    }));
-    config.quirks = $("#quirks").value.split("\n").map(x => x.trim()).filter(Boolean);
-    config.mandatoryRules = $("#mandatoryRules").value.split("\n").map(x => x.trim()).filter(Boolean);
-    config.triggers = $("#triggers").value.split("\n").map(line => {
-      const i = line.indexOf("=>");
-      return i < 0 ? null : { phrase: line.slice(0, i).trim(), instruction: line.slice(i + 2).trim() };
-    }).filter(t => t?.phrase && t?.instruction);
+    config.mandatoryRules = $("#mandatoryRules").value
+      .split("\n")
+      .map(rule => rule.trim())
+      .filter(Boolean);
     $("#saveState").textContent = "Unsaved changes";
     $("#saveState").classList.add("unsaved");
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveDraft, 650);
   };
-  ["aiName","description","visibility","quirks","mandatoryRules","triggers", ...["warmth","playfulness","confidence","verbosity","mischief"].map(k => "slider-" + k)].forEach(id => {
-    $("#" + id).addEventListener("input", updateDraft);
-    $("#" + id).addEventListener("change", updateDraft);
-  });
+  $("#mandatoryRules").addEventListener("input", updateDraft);
+  $("#mandatoryRules").addEventListener("change", updateDraft);
   $("#saveNow").onclick = saveDraft;
   $("#exportConfig").onclick = () => {
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
@@ -316,7 +278,7 @@ async function saveDraft() {
       await saveConfig(sessionId, config);
       $("#saveState").textContent = "Synced";
       $("#saveState").classList.remove("unsaved");
-      setStatus("Character settings saved and synced to the player.", "success");
+      setStatus("Rules saved and synced to the player.", "success");
     } else {
       $("#saveState").textContent = "Saved locally — no session selected";
       setStatus("Saved on this device only. Create an invitation or select a session to sync.", "error");
@@ -337,7 +299,7 @@ async function refreshSessions() {
   try {
     const sessions = await listControllerSessions();
     $("#sessionList").innerHTML = sessions.length ? sessions.map(s => `
-      <button class="session-row" data-session="${s.id}"><span><b>${escapeHTML(s.active_config?.aiName || "Gepeto")}</b><small>${new Date(s.created_at).toLocaleString()}</small></span><span class="session-status ${s.status}">${s.status}</span></button>`).join("") : '<p class="muted">No sessions yet. Create an invitation to begin.</p>';
+      <button class="session-row" data-session="${s.id}"><span><b>${APP_NAME}</b><small>${new Date(s.created_at).toLocaleString()}</small></span><span class="session-status ${s.status}">${s.status}</span></button>`).join("") : '<p class="muted">No sessions yet. Create an invitation to begin.</p>';
     document.querySelectorAll("[data-session]").forEach(btn => btn.onclick = async () => {
       sessionId = btn.dataset.session;
       localStorage.setItem("gepeto-controller-session", sessionId);
@@ -358,10 +320,10 @@ function playerView() {
     <div class="shell player-shell">
       <header class="topbar"><a class="brand" href="#"><span class="brand-mark">G</span><span>Chat Gepeto</span></a><div class="top-actions"><span class="role-pill player-pill">Player</span><span id="engineStatus" class="engine-status">Local AI not loaded</span></div></header>
       <main class="chat-layout">
-        <section class="chat-header"><div><div class="eyebrow">YOUR CONVERSATION</div><h1 id="playerName">${escapeHTML(config.aiName)}</h1><p id="visibilityNote" class="muted">${visibilityText()}</p></div><button class="button secondary small" id="modelButton">Load local AI</button></section>
-        <div class="model-options"><label>Model <select id="modelSelect"><option value="light" ${modelChoice === "light" ? "selected" : ""}>Light · 0.5B (recommended)</option><option value="balanced" ${modelChoice === "balanced" ? "selected" : ""}>More capable · 1.5B (needs more memory)</option></select></label><span class="tiny-note">The first download is large; use Wi-Fi.</span></div>
+        <section class="chat-header"><div><div class="eyebrow">YOUR CONVERSATION</div><h1>${APP_NAME}</h1></div><button class="button secondary small" id="modelButton">Load local AI</button></section>
+        <div class="model-options"><label>Model <select id="modelSelect"><option value="light" ${modelChoice === "light" ? "selected" : ""}>0.5B · smaller, faster</option><option value="balanced" ${modelChoice === "balanced" ? "selected" : ""}>1.5B · recommended for quality</option></select></label><span class="tiny-note">The first download is large; use Wi-Fi.</span></div>
         <section id="messages" class="messages"></section>
-        <form id="chatForm" class="composer"><textarea id="composer" rows="1" placeholder="Message ${escapeHTML(config.aiName)}…" maxlength="4000"></textarea><button id="sendButton" class="send-button" type="submit" aria-label="Send message">↑</button></form>
+        <form id="chatForm" class="composer"><textarea id="composer" rows="1" placeholder="Message ${escapeHTML(APP_NAME)}…" maxlength="4000"></textarea><button id="sendButton" class="send-button" type="submit" aria-label="Send message">↑</button></form>
         <p class="chat-disclaimer">Runs on this device. Your chat is stored for your account/session; the controller does not have transcript access under the current database policy.</p>
       </main>
       <div id="status" class="status-bar"></div>
@@ -375,11 +337,6 @@ function playerView() {
   renderMessages();
 }
 
-function visibilityText() {
-  if (config.visibility === "obvious") return "An openly labelled AI roleplay experiment.";
-  if (config.visibility === "immersive") return "A playful character experience.";
-  return "A playful AI experiment.";
-}
 
 async function startPlayer(row) {
   sessionId = row.id;
@@ -407,9 +364,7 @@ async function startPlayer(row) {
     const isActive = updated.status === "active";
     $("#composer").disabled = !isActive;
     $("#sendButton").disabled = !isActive;
-    $("#playerName").textContent = config.aiName;
-    $("#visibilityNote").textContent = visibilityText();
-    setStatus(isActive ? "Character updated by controller." : "The controller has paused this session.", isActive ? "success" : "error");
+    setStatus(isActive ? "Controller rules updated." : "The controller has paused this session.", isActive ? "success" : "error");
   });
 }
 
