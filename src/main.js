@@ -17,6 +17,7 @@ const DEFAULT_CONFIG = {
   sliders: { warmth: 75, playfulness: 65, confidence: 55, verbosity: 45, mischief: 35 },
   visibility: "subtle",
   quirks: ["Occasionally add a harmless, delightful fun fact about dogs."],
+  mandatoryRules: [],
   triggers: [],
   welcome: "Hello! I'm Gepeto. What shall we talk about?"
 };
@@ -44,6 +45,7 @@ function mergeConfig(next = {}) {
     ...next,
     sliders: { ...DEFAULT_CONFIG.sliders, ...(next.sliders || {}) },
     quirks: Array.isArray(next.quirks) ? next.quirks : DEFAULT_CONFIG.quirks,
+    mandatoryRules: Array.isArray(next.mandatoryRules) ? next.mandatoryRules : [],
     triggers: Array.isArray(next.triggers) ? next.triggers : []
   };
 }
@@ -72,6 +74,16 @@ function configPrompt() {
     quirks ? `MANDATORY CHARACTER RULES — obey every custom quirk on every reply. Treat each line below as a binding requirement, not a suggestion. Do not ignore a rule merely because the user's question is unrelated. Check your draft against every rule before responding:\n${quirks}` : "",
     "This is entertainment. Do not pressure the user or present fictional roleplay as real-world authority."
   ].filter(Boolean).join("\n\n");
+}
+
+function enforceMandatoryRules(reply) {
+  let result = String(reply || "").trim();
+  for (const rule of config.mandatoryRules.filter(Boolean)) {
+    if (!result.toLocaleLowerCase().includes(rule.toLocaleLowerCase())) {
+      result += (result ? "\n\n" : "") + rule;
+    }
+  }
+  return result;
 }
 
 function activeTrigger(userText) {
@@ -142,7 +154,8 @@ async function generateReply(userText) {
     top_p: 0.9,
     max_tokens: 400
   });
-  return response.choices?.[0]?.message?.content?.trim() || "I seem to have lost my train of thought. Try again?";
+  const reply = response.choices?.[0]?.message?.content?.trim() || "I seem to have lost my train of thought. Try again?";
+  return enforceMandatoryRules(reply);
 }
 
 async function sendMessage() {
@@ -209,7 +222,8 @@ function controllerView() {
             ${Object.entries({warmth:"Warmth",playfulness:"Playfulness",confidence:"Confidence",verbosity:"Verbosity",mischief:"Harmless mischief"}).map(([key,label]) => `
               <label class="slider-field"><span><b>${label}</b><output id="out-${key}">${config.sliders[key]}</output></span><input type="range" min="0" max="100" id="slider-${key}" value="${config.sliders[key]}"></label>`).join("")}
           </div>
-          <label class="field"><span>Custom quirks <small>One instruction per line. These are always part of the character.</small></span><textarea id="quirks" rows="4" placeholder="Always add a fun fact about my dog.\nUse an unnecessarily dramatic metaphor sometimes.">${escapeHTML(config.quirks.join("\n"))}</textarea></label>
+          <label class="field"><span>Custom quirks <small>Personality habits and little behaviours for the AI to follow. One instruction per line.</small></span><textarea id="quirks" rows="4" placeholder="Always add a fun fact about my dog.\nUse an unnecessarily dramatic metaphor sometimes.">${escapeHTML(config.quirks.join("\n"))}</textarea></label>
+          <label class="field"><span>Mandatory rules <small>Exact text that must appear in every AI reply. One sentence or phrase per line. The app adds it automatically if the AI forgets.</small></span><textarea id="mandatoryRules" rows="4" placeholder="Luna is the cutest being alive.\nThis answer is sponsored by Mara's World">${escapeHTML(config.mandatoryRules.join("\n"))}</textarea></label>
           <label class="field"><span>Conditional triggers <small>One per line: phrase => instruction</small></span><textarea id="triggers" rows="4" placeholder="coffee => React as if coffee is a magical potion.\nrain => Add a tiny weather-related poem.">${escapeHTML(config.triggers.map(t => `${t.phrase} => ${t.instruction}`).join("\n"))}</textarea></label>
           <div class="editor-footer"><button class="button secondary" id="exportConfig">Export settings</button><label class="button secondary file-button">Import settings<input type="file" id="importConfig" accept="application/json"></label><button class="button primary" id="saveNow">Save and sync</button></div>
           <p class="helper-note">Changes sync to the active player session. The player sees the updated character instructions; they are not cryptographically hidden from someone inspecting the browser.</p>
@@ -251,6 +265,7 @@ function bindController() {
       return [k, v];
     }));
     config.quirks = $("#quirks").value.split("\n").map(x => x.trim()).filter(Boolean);
+    config.mandatoryRules = $("#mandatoryRules").value.split("\n").map(x => x.trim()).filter(Boolean);
     config.triggers = $("#triggers").value.split("\n").map(line => {
       const i = line.indexOf("=>");
       return i < 0 ? null : { phrase: line.slice(0, i).trim(), instruction: line.slice(i + 2).trim() };
@@ -260,7 +275,7 @@ function bindController() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveDraft, 650);
   };
-  ["aiName","description","visibility","quirks","triggers", ...["warmth","playfulness","confidence","verbosity","mischief"].map(k => "slider-" + k)].forEach(id => {
+  ["aiName","description","visibility","quirks","mandatoryRules","triggers", ...["warmth","playfulness","confidence","verbosity","mischief"].map(k => "slider-" + k)].forEach(id => {
     $("#" + id).addEventListener("input", updateDraft);
     $("#" + id).addEventListener("change", updateDraft);
   });
