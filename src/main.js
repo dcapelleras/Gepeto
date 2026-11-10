@@ -361,12 +361,11 @@ async function startPlayer(row) {
   config = mergeConfig(row.active_config);
   localStorage.setItem("gepeto-player-session", sessionId);
   localStorage.removeItem("gepeto-invite-pending");
-  if (row.status !== "active") {
-    showScreen('<div class="center-card"><h1>Session paused</h1><p>The controller has paused this character. Try again later.</p></div>');
-    return;
-  }
   playerView();
-  setStatus("Connected. Load the local model when you're ready.", "success");
+  const paused = row.status !== "active";
+  $("#composer").disabled = paused;
+  $("#sendButton").disabled = paused;
+  setStatus(paused ? "The controller has paused this session." : "Connected. Load the local model when you're ready.", paused ? "error" : "success");
   try {
     const saved = await loadMessages(sessionId);
     messages = saved.map(m => ({ role: m.role, content: m.content, created_at: m.created_at }));
@@ -379,15 +378,12 @@ async function startPlayer(row) {
   }
   unsubscribe = subscribeSession(sessionId, async updated => {
     config = mergeConfig(updated.active_config);
-    if (updated.status !== "active") {
-      setStatus("The controller has paused this session.", "error");
-      $("#composer").disabled = true;
-      $("#sendButton").disabled = true;
-      return;
-    }
+    const isActive = updated.status === "active";
+    $("#composer").disabled = !isActive;
+    $("#sendButton").disabled = !isActive;
     $("#playerName").textContent = config.aiName;
     $("#visibilityNote").textContent = visibilityText();
-    setStatus("Character updated by controller.", "success");
+    setStatus(isActive ? "Character updated by controller." : "The controller has paused this session.", isActive ? "success" : "error");
   });
 }
 
