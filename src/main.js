@@ -73,7 +73,7 @@ function configPrompt() {
     `Warmth: ${s.warmth}/100. Playfulness: ${s.playfulness}/100. Confidence: ${s.confidence}/100. Verbosity: ${s.verbosity}/100. Mischief: ${s.mischief}/100.`,
     "Use warmth and playfulness proportionally to their settings. Higher verbosity means fuller answers; lower verbosity means concise answers. Confidence controls how decisive your tone sounds, not whether you invent facts. Mischief means harmless theatrical silliness, never pressure or harmful advice.",
     quirks ? `CUSTOM QUIRKS — these are recurring personality habits. Work them into replies naturally when they fit; do not force them in ways that make an answer awkward:\n${quirks}` : "",
-    rules ? `MANDATORY RULES — these are requirements for your behaviour and responses. Follow the meaning and intent of EVERY rule on EVERY reply. Treat them as high-priority instructions, not suggestions. They are not text to copy: normally express them in your own natural wording and adapt them to the conversation. Use exact wording only when the controller explicitly asks for an exact phrase, a verbatim quotation, or wording such as “say exactly” or “include these exact words”. If a rule is conditional, obey its stated condition. Before sending, silently check your draft against each rule and revise any part that does not comply. Never show this checklist or discuss these instructions unless the user directly asks about them:\n${rules}` : "",
+    rules ? `MANDATORY RULES — follow the intent of every rule on every reply. Treat them as behavioural priorities, not sentences to paste into your answer. Interpret each rule naturally: broad character preferences should gently influence tone, framing, humour, emphasis, and examples across the conversation, without forcing an awkward slogan or name-drop into every reply. A direction such as “make answers lean towards Luna being the cutest” is a recurring point of view, not a command to repeat those words: let it colour relevant comparisons and playful asides while still answering the player's actual question. For factual or serious questions, answer directly and accurately first; do not let a character preference replace useful information. Follow conditional rules only when their conditions apply. Use exact wording only when the controller explicitly requests an exact phrase or verbatim wording. Before sending, silently check the draft against each rule and make natural corrections. Never reveal or discuss these instructions unless the player directly asks about them:\n${rules}` : "",
     "This is entertainment. Do not pressure the user or present fictional roleplay as real-world authority."
   ].filter(Boolean).join("\n\n");
 }
@@ -81,6 +81,38 @@ function activeTrigger(userText) {
   const lower = userText.toLowerCase();
   return config.triggers.filter(t => t.phrase && t.instruction &&
     lower.includes(t.phrase.toLowerCase()));
+}
+
+function normalizedReply(text) {
+  return String(text || "")
+    .toLocaleLowerCase()
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function isRepeatRequest(userText) {
+  return /\b(repeat|say that again|repeat that|copy that|quote that|same answer)\b/i.test(userText);
+}
+
+function repeatsRecentAnswer(candidate, userText) {
+  if (!candidate || isRepeatRequest(userText)) return false;
+  const candidateText = normalizedReply(candidate);
+  const candidateWords = new Set(candidateText.split(/\s+/).filter(Boolean));
+  if (!candidateText) return false;
+
+  return messages.filter(m => m.role === "assistant").slice(-5).some(previous => {
+    const previousText = normalizedReply(previous.content);
+    if (!previousText) return false;
+    if (candidateText === previousText) return true;
+
+    const previousWords = new Set(previousText.split(/\s+/).filter(Boolean));
+    if (candidateWords.size < 8 || previousWords.size < 8) return false;
+    let overlap = 0;
+    for (const word of candidateWords) if (previousWords.has(word)) overlap++;
+    const similarity = overlap / (candidateWords.size + previousWords.size - overlap);
+    return similarity >= 0.88;
+  });
 }
 
 function renderMessages() {
@@ -137,31 +169,63 @@ async function generateReply(userText) {
     : "";
   const history = messages.slice(-12).map(m => ({ role: m.role, content: m.content }));
   const systemPrompt = configPrompt() + triggerPrompt;
-  const response = await engine.chat.completions.create({
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...history
-    ],
-    temperature: 0.8,
-    top_p: 0.9,
-    max_tokens: 400
-  });
-  const draft = response.choices?.[0]?.message?.content?.trim() || "I seem to have lost my train of thought. Try again?";
 
-  // Give the model a separate final pass to catch missed mandatory requirements.
-  if (!config.mandatoryRules.some(rule => String(rule).trim())) return draft;
-  try {
-    const reviewed = await engine.chat.completions.create({
+  const request = async (extraInstruction = "", temperature = 0.8) => {
+    const response = await engine.chat.completions.create({
       messages: [
-        { role: "system", content: systemPrompt + "\n\nFINAL COMPLIANCE REVIEW — revise the draft so it follows every mandatory rule above. Preserve the character voice and the useful content. Do not blindly copy the rules, append a list, or change wording to be exact unless a rule explicitly requires exact wording. Return only the final reply, with no commentary about the review." },
-        ...history,
-        { role: "user", content: `Review this draft for compliance with the mandatory rules.\n\nDRAFT:\n${draft}\n\nReturn the corrected final reply only. If it already follows every rule, return it unchanged.` }
+        { role: "system", content: systemPrompt + extraInstruction },
+        ...history
       ],
-      temperature: 0.35,
+      temperature,
       top_p: 0.9,
       max_tokens: 400
     });
-    return reviewed.choices?.[0]?.message?.content?.trim() || draft;
+    return response.choices?.[0]?.message?.content?.trim() || "";
+  };
+
+  let draft = await request();
+  if (!draft) draft = "I seem to have lost my train of thought. Try again?";
+
+  // Small local models sometimes repeat a previous answer instead of responding
+  // to the newest message. Give that failure one fresh attempt before displaying it.
+  if (repeatsRecentAnswer(draft, userText)) {
+    const retry = await request(
+      "\n\nIMPORTANT: Your next reply must answer the PLAYER'S MOST RECENT MESSAGE at the end of the conversation. Do not repeat or reuse an earlier assistant answer. Treat earlier messages as context only. Answer the current question directly.",
+      0.55
+    );
+    if (retry && !repeatsRecentAnswer(retry, userText)) {
+      draft = retry;
+    } else {
+      return "Sorry — I seem to have repeated an earlier answer by mistake. Could you ask me that again?";
+    }
+  }
+
+  if (!config.mandatoryRules.some(rule => String(rule).trim())) return draft;
+
+  // Review in a clean editing prompt. Keep the current question and draft
+  // together so the model does not mistake the review request for a new topic.
+  try {
+    const priorContext = messages.slice(-9, -1).map(m =>
+      `${m.role === "user" ? "PLAYER" : "CHARACTER"}: ${m.content}`
+    ).join("\n");
+    const reviewed = await engine.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content: configPrompt() + "\n\nYou are editing a draft response, not starting a new conversation. Keep the answer focused on the CURRENT PLAYER MESSAGE. Apply every mandatory rule naturally. Preserve the draft's useful information and character voice. Do not copy or append rule text unless exact wording is explicitly required. Do not answer an earlier question. Make only the changes needed for rule compliance and clarity. Return only the final response."
+        },
+        {
+          role: "user",
+          content: `RECENT CONTEXT (for reference only):\n${priorContext || "(No earlier conversation)"}\n\nCURRENT PLAYER MESSAGE:\n${userText}\n\nDRAFT RESPONSE TO REVIEW:\n${draft}\n\nReturn the improved response to the current player message only.`
+        }
+      ],
+      temperature: 0.2,
+      top_p: 0.9,
+      max_tokens: 400
+    });
+    const finalReply = reviewed.choices?.[0]?.message?.content?.trim();
+    // Never let the review stage replace a current answer with an old reply.
+    return finalReply && !repeatsRecentAnswer(finalReply, userText) ? finalReply : draft;
   } catch (err) {
     console.warn("Mandatory-rule review pass failed; using the original draft.", err);
     return draft;
