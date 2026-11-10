@@ -103,11 +103,14 @@ export async function listControllerSessions() {
 }
 
 export async function saveConfig(sessionId, config) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("gepeto_sessions")
     .update({ active_config: config })
-    .eq("id", sessionId);
+    .eq("id", sessionId)
+    .select("id")
+    .single();
   if (error) throw error;
+  if (!data) throw new Error("No session was updated. Select one of your sessions and try again.");
 }
 
 export async function setSessionStatus(sessionId, status) {
