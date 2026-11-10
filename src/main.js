@@ -125,7 +125,7 @@ async function generateReply(userText) {
 
   // Keep a few recent messages for follow-up context without overwhelming
   // the small local model with a long transcript.
-  const history = messages.slice(-6).map(message => ({
+  const history = messages.slice(-4).map(message => ({
     role: message.role,
     content: message.content
   }));
