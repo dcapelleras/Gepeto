@@ -114,31 +114,52 @@ async function loadModel() {
   }
 }
 
-async function generateRuleAside(userText, draft, rules) {
-  if (!rules.length) return "";
-
-  const numberedRules = rules
-    .map((rule, index) => `${index + 1}. ${rule}`)
-    .join("\n");
+async function generateOneRuleAside(userText, draft, rule) {
+  const messagesForRule = [
+    {
+      role: "system",
+      content: "Write ONE short sentence as a separate follow-up after an assistant has answered a question. Do not answer the question again. Your only task is to express the single controller rule supplied by the user. The rule is mandatory. Unless the rule explicitly states a condition that is not met, you MUST include it in this sentence, even if it seems unrelated to the question. Make a simple, sensible connection to the player's question or the main answer. Example: rule 'Luna is the cutest' + question 'What's the weather?' could become 'Whatever the weather is doing, I bet it feels brighter with Luna around being adorable.' Do not repeat the main answer. Do not copy the rule's exact wording unless it explicitly requires exact wording. Use one natural sentence, no label, no explanation, no quotes. If and only if the rule explicitly states a condition and that condition is not met, return exactly [SKIP]."
+    },
+    {
+      role: "user",
+      content: `PLAYER QUESTION:\n${userText}\n\nMAIN ANSWER ALREADY GIVEN:\n${draft}\n\nTHE ONE CONTROLLER RULE YOU MUST EXPRESS:\n${rule}\n\nWrite the separate follow-up sentence now.`
+    }
+  ];
 
   const response = await engine.chat.completions.create({
-    messages: [
-      {
-        role: "system",
-        content: "You write the SECOND message in a two-part assistant reply. The first message has already answered the player's question correctly. Your job is NOT to answer the question again. Your only job is to express the controller's rules in a short, natural, relevant aside that connects to the player's latest question or the first answer. EVERY rule without an explicit condition is compulsory in THIS second message, even when unrelated to the question. Do not decide that a rule is irrelevant. Find a simple, sensible link to the topic. For example, if the rule says Luna is the cutest and the question is about the weather, you can say that even gloomy weather feels better when Luna is around being adorable. If there are multiple rules, include all of them in one coherent aside. Do not simply repeat the rule as written; express its meaning naturally. Keep this second message short (usually one or two sentences), clear, and not silly or nonsensical. Do not repeat the factual answer. Do not mention that you are following rules. Return only the second message, with no label, JSON, bullet list, or explanation."
-      },
-      {
-        role: "user",
-        content: `PLAYER'S LATEST QUESTION:\n${userText}\n\nTHE MAIN ANSWER ALREADY GIVEN:\n${draft}\n\nCONTROLLER RULES THAT MUST ALL APPEAR IN THIS SECOND MESSAGE:\n${numberedRules}\n\nWrite the separate rule-related follow-up message now. Make a natural connection to the question or answer, and visibly express every rule.`
-      }
-    ],
-    temperature: 0.65,
+    messages: messagesForRule,
+    temperature: 0.55,
     top_p: 0.9,
-    max_tokens: 160
+    max_tokens: 90
   });
+  return response.choices?.[0]?.message?.content?.trim() || "";
+}
 
-  const aside = response.choices?.[0]?.message?.content?.trim() || "";
-  return aside;
+async function generateRuleAside(userText, draft, rules) {
+  const sentences = [];
+
+  // Handle each rule in its own small task, rather than asking the small
+  // model to juggle several instructions and a JSON schema simultaneously.
+  for (const rule of rules) {
+    try {
+      let sentence = await generateOneRuleAside(userText, draft, rule);
+      if (!sentence || sentence === "[SKIP]") {
+        // One brief retry for unconditional rules or accidental empty output.
+        const retry = await generateOneRuleAside(
+          userText,
+          draft,
+          `This is an unconditional rule. It applies to this reply even if unrelated to the topic: ${rule}`
+        );
+        sentence = retry;
+      }
+      if (sentence && sentence !== "[SKIP]") sentences.push(sentence);
+    } catch (err) {
+      console.warn("Could not generate one rule-related sentence.", err);
+      return null;
+    }
+  }
+
+  return sentences.join(" ");
 }
 
 async function generateReply(userText) {
@@ -169,13 +190,16 @@ async function generateReply(userText) {
   // Ask for a separate rule-focused follow-up. The main answer is never
   // passed back for editing and remains exactly as originally generated.
   try {
-    const ruleAside = await generateRuleAside(userText, answer, rules);
+    const generatedAside = await generateRuleAside(userText, answer, rules);
+    const ruleAside = generatedAside === null
+      ? "I couldn't generate the rule-related follow-up this time."
+      : generatedAside || "I couldn't produce the rule-related follow-up for this message.";
     return { answer, ruleAside };
   } catch (err) {
     console.warn("Could not generate the separate rule-related message.", err);
     return {
       answer,
-      ruleAside: "I couldn't generate the additional rule-related message this time."
+      ruleAside: "I couldn't generate the rule-related follow-up this time."
     };
   }
 }
